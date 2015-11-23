@@ -1,0 +1,235 @@
+#!/usr/bin/env python
+
+# Copyright Cisco Systems
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+DOCUMENTATION = '''
+---
+
+module: nxos_file_copy
+
+short_description: Copies files to NXOS devices.
+
+description:
+    - The image must be present on the SCP server at the scp-path.
+
+
+author: Bobby Watson (bwatsoni@cisco.com)
+
+requirements:
+    - Cisco NX-OS
+    - pexpect
+
+notes:
+    - File copies may take an extended period of time. Because Ansible does not
+    provide updates during this time, it may be beneficial to include a warning
+    in the name of the task that lets the user know that there may be an extended
+    period of non-responsiveness while the file is downloaded.
+
+options:
+    host:
+        description:
+            - Host NXOS device to copy file to.
+        required: true
+        default: null
+
+    username:
+        description:
+            - Username used to login to NXOS device.
+        required: true
+        default: null
+
+    password:
+        description:
+            - Password used to login to NXOS device.
+        required: true
+        default: null
+
+    vrf:
+        description:
+            - VRF to use when copying file via SCP.
+        required: false
+        default: management
+
+    scp_server:
+        description:
+            - IP address or hostname of SCP server where file is hosted.
+        required: true
+        default: null
+
+    scp_path:
+        description:
+            - Full path to file (but not including file name.)
+        required: true
+        default: null
+
+    scp_user:
+        description:
+            - Username for SCP server where file is hosted.
+        required: true
+        default: null
+
+    scp_password:
+        description:
+            - Password for SCP server where file is hosted.
+        required: true
+        default: null
+
+    filename:
+        description:
+            - Filename of image to be used.
+        required: true
+        default: null
+
+    destination:
+        description:
+            - Destination for file to be copied to.
+        required: false
+        default: bootflash:
+
+    force:
+        description:
+            - Force copying file even if it already exists on NXOS device.
+        required: false
+        default: false
+
+
+'''
+
+EXAMPLES = '''
+- name: Copy NXOS Image
+  nxos_file_copy:
+    host: "{{ inventory_hostname }}"
+    username: cisco
+    password: cisco
+    scp_server: 192.168.1.10
+    scp_user: user
+    scp_password: password
+    filename: n9000-dk9.7.0.3.I1.0.236.bin
+    path: /files/nxos
+    destination: bootflash:
+    vrf: management
+    force: false
+
+'''
+
+from pexpect import pxssh
+import pexpect
+from os import path
+from time import sleep
+
+def file_copy(module, host, username, password, scp_server, scp_user, scp_password,
+              path, filename, destination, vrf, force):
+    try:
+        p = pxssh.pxssh(options={"StrictHostKeyChecking": "no",
+                                 "UserKnownHostsFile": "/dev/null"})
+        # Enable the following line if you need to see all output. This will
+        # make Ansible think that there was an error however.
+        # p.logfile = sys.stdout
+        p.force_password = True
+        p.login(host, username, password, auto_prompt_reset=False)
+        p.PROMPT = '\r\n.*# '
+
+        # Make sure switch doesn't send any /b literals due to term width
+        p.sendline(' terminal width 511')
+        p.prompt()
+
+        # If check mode enabled, see if file already exists.
+        if module.check_mode:
+            p.sendline('dir')
+            i = p.expect([filename, "controller.*logflash", pexpect.TIMEOUT], timeout=5)
+            if i == 0:
+                module.exit_json(changed=False)
+            if i == 1:
+                module.fail_json(msg="switch not running NXOS")
+            if i == 2:
+                module.exit_json(changed=True)
+
+        # Send SCP copy command
+        p.sendline('copy scp://{}@{}/{} {} vrf {}'
+            .format(scp_user, scp_server, os.path.join(path, filename), destination, vrf))
+
+        # Handle any prompts that happen when initiating SCP copy
+        while True:
+            sleep(1)
+            i = p.expect(["(?i)cannot stat", "(?i)do you want to overwrite", "(?i)continue connecting", "(?i)Connection timed out", "(?i)password", pexpect.TIMEOUT], timeout=35)
+            if i == 0:
+                module.fail_json(msg="switch not running NXOS: {}".format(p.before))
+            if i == 1:
+                if force:
+                    p.sendline('y')
+                    continue
+                else:
+                    module.exit_json(changed=False)
+            if i == 2:
+                p.sendline('yes')
+                break
+            if i == 3:
+                module.fail_json(msg="Connection to SCP server timed out.")
+            if i == 4:
+                p.sendline(scp_password)
+                break
+            if i == 5:
+                module.fail_json(msg="Error during SCP Copy: {}".format(p.before))
+        while True:
+            sleep(1)
+            i = p.expect(['%', '(?i)Copy complete', pexpect.TIMEOUT])
+            if i == 0:
+                sleep(1)
+                continue
+            if i == 1:
+                p.logout()
+                module.exit_json(changed=True)
+            if i == 2:
+                module.fail_json(msg="SCP Copy Error: {}".format(p.before))
+    except (pxssh.ExceptionPxssh, pexpect.exceptions) as e:
+        module.fail_json(msg="Connection Error: {}".format(e))
+
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            host=dict(required=True, type='str'),
+            username=dict(required=True, type='str'),
+            password=dict(required=True, type='str', no_log=True),
+            scp_server=dict(required=True, type='str'),
+            scp_user=dict(required=True, type='str'),
+            scp_password=dict(required=True, type='str', no_log=True),
+            filename=dict(required=True, type='str'),
+            path=dict(required=True, type='str'),
+            destination=dict(required=False, default='bootflash:', type='str'),
+            vrf=dict(required=False, default='management', type='str'),
+            force=dict(required=False, default=False, type='bool')
+        ),
+        supports_check_mode=True,
+    )
+
+    host = module.params['host']
+    username = module.params['username']
+    password = module.params['password']
+    scp_server = module.params['scp_server']
+    scp_user = module.params['scp_user']
+    scp_password = module.params['scp_password']
+    path = module.params['path']
+    filename = module.params['filename']
+    destination = module.params['destination']
+    vrf = module.params['vrf']
+    force = module.params['force']
+
+    file_copy(module, host, username, password, scp_server, scp_user, scp_password,
+              path, filename, destination, vrf, force)
+
+from ansible.module_utils.basic import *
+if __name__ == '__main__':
+    main()
