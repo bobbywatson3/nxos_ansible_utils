@@ -77,7 +77,6 @@ EXAMPLES = '''
     enabled: true
     write: true
 '''
-
 from pexpect import pxssh
 import pexpect
 
@@ -103,16 +102,16 @@ def set_nxapi(module, host, username, password, enabled, write):
             i = p.expect(["feature nxapi", "(?i)Incorrect command", pexpect.TIMEOUT], timeout=5)
             if i == 0:
                 if enabled:
-                    module.exit_json(changed=False)
+                    module.exit_json(changed=False, nxapi_enabled=True)
                 else:
-                    module.exit_json(changed=True)
+                    module.exit_json(changed=True, nxapi_enabled=True)
             if i == 1:
                 module.fail_json(msg="switch not running NXOS")
             if i == 2:
                 if enabled:
-                    module.exit_json(changed=True, debug=p.before)
+                    module.exit_json(changed=True, nxapi_enabled=False)
                 else:
-                    module.exit_json(changed=False, debug=p.before)
+                    module.exit_json(changed=False, nxapi_enabled=False)
 
         p.sendline("conf t")
         i = p.expect(["(?i)command not found", p.PROMPT])
