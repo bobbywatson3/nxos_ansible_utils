@@ -94,6 +94,12 @@ def set_nxapi(module, host, username, password, enabled, write):
 
         # Make sure switch doesn't send any /b literals due to term width
         p.sendline(' terminal width 511')
+        # Make sure switch is running NXOS
+        i = p.expect([p.PROMPT, "(?i)bash"])
+        if i == 0:
+            pass
+        if i == 1:
+            module.fail_json(msg="switch not running NXOS")
         p.prompt()
 
         # If check mode enabled, see if file already exists.
@@ -117,6 +123,8 @@ def set_nxapi(module, host, username, password, enabled, write):
         i = p.expect(["(?i)command not found", p.PROMPT])
         if i == 0:
             module.fail_json(msg="switch not running NXOS")
+        if i == 1:
+            pass
         if enabled:
             p.sendline("feature nxapi")
         else:

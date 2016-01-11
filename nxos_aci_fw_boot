@@ -1,0 +1,361 @@
+#!/usr/bin/env python
+
+# Copyright Cisco Systems
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+DOCUMENTATION = '''
+---
+
+module: nxos_aci_fw_boot
+
+short_description: Boots NX-OS switch into ACI mode.
+
+description:
+    - Boots NX-OS switch into ACI mode over a console connection.
+
+
+author: Bobby Watson (bwatsoni@cisco.com)
+
+requirements:
+    - Cisco NX-OS
+    - pexpect
+
+notes:
+    - A console server MUST be connected to the switch in order to use
+      this module.
+    - The switch must already have the FW image copied to the device.
+      This module simply sets the switch to boot from the new firmware.
+
+options:
+    con_host:
+        description:
+            - Console server to connect to.
+        required: true
+        default: null
+
+    con_username:
+        description:
+            - Username used to login to console server.
+        required: true
+        default: null
+
+    con_password:
+        description:
+            - Password used to login to console server.
+        required: true
+        default: null
+
+    username:
+        description:
+            - Username used to login to NXOS device.
+        required: true
+        default: null
+
+    password:
+        description:
+            - Password used to login to NXOS device.
+        required: true
+        default: null
+
+    filename:
+        description:
+            - Filename of image to be used.
+        required: true
+        default: null
+
+    mode:
+        description:
+            - Boot into NXOS or ACI mode.
+        required: true
+        default: null
+        choices: ['nxos', 'aci']
+
+    conf_file:
+        description:
+            - Path and name of the NXOS conf file to restore when booting into NXOS.
+        required: False
+        default: null
+
+'''
+
+EXAMPLES = '''
+- name: Boot to ACI
+  nxos_aci_fw_boot:
+    con_host: "{{ inventory_hostname }}-console"
+    con_username: user
+    con_password: pass
+    username: user
+    password: pass
+    mode: aci
+    filename: n9000-dk9.7.0.3.I1.0.236.bin
+
+- name: Rollback to NXOS
+  nxos_aci_fw_boot:
+    con_host: "{{ inventory_hostname }}-console"
+    con_username: user
+    con_password: pass
+    username: user
+    password: pass
+    mode: nxos
+    filename: n9000-dk9.7.0.3.I1.0.236.bin
+    conf_file: "bootflash:/configs/config_backup.cfg"
+
+'''
+
+from pexpect import pxssh
+import pexpect
+from time import sleep
+
+
+class fw_boot(object):
+    """
+    This is the SSH session to the console of the Nexus Switch
+    """
+    def __init__(self, module):
+        self.module = module
+        self.con_host = module.params['con_host']
+        self.con_username = module.params['con_username']
+        self.con_password = module.params['con_password']
+        self.username = module.params['username']
+        self.password = module.params['password']
+        self.filename = module.params['filename']
+        self.mode = module.params['mode']
+        self.conf_file = module.params['conf_file']
+        self.session = self.create_session()
+        self.logged_in = False
+        self.nxos_booted = False
+
+    def create_session(self):
+        try:
+            sesh = pxssh.pxssh(options={"StrictHostKeyChecking": "no",
+                               "UserKnownHostsFile": "/dev/null"})
+            # Enable the following line if you need to see all output.
+            # This will make Ansible think that there was an error, however.
+            # sesh.logfile_read = sys.stdout
+            sesh.force_password = True
+            return(sesh)
+
+        except (pxssh.ExceptionPxssh, pexpect.exceptions) as e:
+            sesh.sendline('exit')
+            sesh.close()
+            self.module.fail_json(msg="Connection Error: {}".format(e))
+
+    def login(self):
+        sesh = self.session
+        for attempt in range(5):
+            try:
+                sesh.login(self.con_host, self.con_username, self.con_password,
+                           auto_prompt_reset=False)
+                sesh.PROMPT = '\r\n.*# '
+
+                # After login, send enter to show prompt
+                sesh.sendline('\r\n')
+                sleep(1)
+                i = sesh.expect(["(?i)login:", "(?i)password:", "\r\n.*# ",
+                                "(?i)loader >"])
+                if i == 0:
+                    sesh.sendline(self.username)
+                    sleep(1)
+                    sesh.sendline(self.password)
+                if i == 1:
+                    sesh.sendline(self.password)
+                if i == 2:
+                    pass
+                if i == 3:
+                    pass
+
+                self.logged_in = True
+                return True
+
+            # If the login fails, catch the exception and retry again
+            except (pxssh.ExceptionPxssh, pexpect.exceptions.TIMEOUT) as e:
+                break
+
+            # If all retries fail, error out
+            else:
+                sesh.close()
+                self.module.fail_json(msg="Login Error: {}".format(e))
+
+    def boot_aci(self):
+        if not self.logged_in:
+            self.login()
+
+        sesh = self.session
+        for attempt in range(5):
+            try:
+                i = sesh.expect([sesh.PROMPT, "(?i)loader >"])
+                if i == 0:
+                    # Check to see if switch is already booted into ACI mode
+                    sesh.sendline('bg')
+                    a = sesh.expect(['(?i)bash', '(?i)invalid command'])
+                    if a == 0:
+                        self.disconnect()
+                        self.module.exit_json(changed=False)
+                    if a == 1:
+                        # Make sure switch doesn't send any /b literals
+                        # due to term width
+                        sesh.sendline('terminal width 511')
+                        sesh.prompt()
+                        sesh.sendline('terminal length 0')
+                        sesh.prompt()
+                        sesh.sendline('config')
+                        sesh.prompt()
+                        sesh.sendline('no boot nxos')
+                        sesh.sendline('copy run start')
+                        sesh.prompt()
+                        sesh.sendline('reload')
+                        sesh.expect('reload')
+                        sesh.sendline('y')
+                        sleep(30)
+                if i == 1:
+                    pass
+                sesh.expect('>', timeout=300)
+                sleep(2)
+                sesh.sendline('boot {}'.format(self.filename))
+                sesh.expect("(?i)login:", timeout=600)
+                while True:
+                    sleep(1)
+                    a = sesh.expect(["(?i)login:", "(?i)re-login:", "(?i)password",
+                                    "(?i)certificate verification passed"])
+                    if a == 0:
+                        sesh.sendline(self.username)
+                    if a == 1:
+                        sesh.sendline(self.username)
+                    if a == 2 or 3:
+                        sesh.sendline(self.password)
+                        sesh.prompt()
+                        self.disconnect()
+                        self.module.exit_json(changed=True)
+
+            # If the login fails, catch the exception and retry again
+            except (pxssh.ExceptionPxssh, pexpect.exceptions.TIMEOUT) as e:
+                break
+
+            # If all retries fail, error out
+            else:
+                sesh.close()
+                self.module.fail_json(msg="ACI Boot Error: {}".format(e))
+
+    def boot_nxos(self):
+        if not self.logged_in:
+            self.login()
+        sleep(2)
+        sesh = self.session
+        for attempt in range(5):
+            try:
+                i = sesh.expect(['loader >', sesh.PROMPT])
+                if i == 0:
+                    pass
+                if i == 1:
+                    # Check to see if switch is already booted into NXOS
+                    sesh.sendline('show version internal build-identifier')
+                    a = sesh.expect(['(?i)nxos', '(?i)incorrect command'])
+                    if a == 0:
+                        self.disconnect()
+                        self.module.exit_json(changed=False)
+                    if a == 1:
+                        sesh.sendline('reload')
+                        sesh.expect('(?i)reload the chassis')
+                        sesh.sendline('y')
+                        sesh.expect('(?i)Booting from Primary Bios')
+                        sesh.sendline('\x03')
+                        sleep(1)
+                        sesh.sendline('\x03')
+                        sesh.sendline('\x03')
+                        sesh.expect('loader >')
+                sleep(2)
+                sesh.sendline('boot {}'.format(self.filename))
+                sesh.expect('(?i)image valid')
+                sesh.expect('(?i)abort auto provisioning', timeout=300)
+                sesh.sendline('')
+                sesh.sendline('y')
+                sesh.expect('secure password')
+                sesh.sendline('y')
+                sesh.expect('(?i)enter the password')
+                sesh.sendline(self.password)
+                sesh.expect('(?i)confirm the password')
+                sesh.sendline(self.password)
+                sesh.expect('(?i)basic configuration dialog')
+                sesh.sendline('no')
+                sesh.expect('(?i)login')
+                sesh.sendline(self.username)
+                sesh.expect('(?i)password')
+                sesh.sendline(self.password)
+
+                self.nxos_booted = True
+                return True
+
+            # If the login fails, catch the exception and retry again
+            except (pxssh.ExceptionPxssh, pexpect.exceptions.TIMEOUT) as e:
+                break
+
+            # If all retries fail, error out
+            else:
+                sesh.close()
+                self.module.fail_json(msg="NXOS Boot Error: {}".format(e))
+
+    def restore_nxos_cfg(self):
+        if not self.conf_file:
+            pass
+        if not self.logged_in:
+            self.login()
+        if not self.nxos_booted:
+            self.boot_nxos()
+
+        sesh = self.session
+        try:
+            sesh.prompt()
+            sesh.sendline('copy {} running-config'.format(self.conf_file))
+            sesh.prompt()
+            sesh.sendline('copy run start')
+        except (pxssh.ExceptionPxssh, pexpect.exceptions.TIMEOUT) as e:
+            self.disconnect()
+            self.module.fail_json(msg="NXOS Config Restore Error: {}".format(e))
+        return True
+
+    def disconnect(self):
+        # Cannot use logout() since this is a console. Manually disconnect
+        self.session.sendline('exit')
+        self.session.close()
+
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            con_host=dict(required=True, type='str'),
+            con_username=dict(required=True, type='str'),
+            con_password=dict(required=True, type='str', no_log=True),
+            username=dict(required=True, type='str'),
+            password=dict(required=True, type='str', no_log=True),
+            filename=dict(required=True, type='str'),
+            mode=dict(required=True, type='str', choices=['nxos', 'aci']),
+            conf_file=dict(default=None, required=False, type='str')
+        ),
+        supports_check_mode=True,
+    )
+
+    session = fw_boot(module)
+    session.login()
+    if session.mode == 'aci':
+        session.boot_aci()
+    else:
+        session.boot_nxos()
+        if session.conf_file is not None:
+            session.restore_nxos_cfg()
+    session.disconnect()
+    session.module.exit_json(changed=True)
+
+from ansible.module_utils.basic import *
+if __name__ == '__main__':
+    main()
