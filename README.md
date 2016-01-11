@@ -6,7 +6,7 @@ This is a collection of modules for Ansible which can be used to automate Cisco 
 - pexpect
 
 ## Usage
-Copy files into Ansible library directory and add tasks to playbook.
+Copy files into Ansible library directory and use the following examples as a guide for tasks to write in your playbook.
 
 - nxos_file_xfer
 ```yaml
