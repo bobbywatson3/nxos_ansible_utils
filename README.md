@@ -37,9 +37,9 @@ Copy files into Ansible library directory and add tasks to playbook.
     enabled: true
     write: true
 ```
-
-- name: Boot into ACI
+- nxos_aci_fw_boot
 ```yaml
+- name: Boot into ACI
   nxos_aci_fw_boot:
     con_host: console_server
     con_username: console_username
@@ -50,8 +50,8 @@ Copy files into Ansible library directory and add tasks to playbook.
     filename: aci-n9000-dk9.0.0.0.bin
 ```
 
-- name: Boot into NXOS
 ```yaml
+- name: Boot into NXOS
   nxos_aci_fw_boot:
     con_host: console_host_server
     con_username: console_username
