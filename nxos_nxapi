@@ -102,7 +102,7 @@ def set_nxapi(module, host, username, password, enabled, write):
             module.fail_json(msg="switch not running NXOS")
         p.prompt()
 
-        # If check mode enabled, see if file already exists.
+        # If check mode enabled, see if NXOS is already enabled.
         if module.check_mode:
             p.sendline('show run')
             i = p.expect(["feature nxapi", "(?i)Incorrect command", pexpect.TIMEOUT], timeout=5)
